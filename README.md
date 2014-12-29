@@ -29,13 +29,17 @@ sudo santa sync
 
 Contributions are welcome.
 
+## Generate certificates
+http://golang.org/src/crypto/tls/generate_cert.go?m=text
+
+go run contrib/generate_cert.go -host="127.0.0.1" -ca=false
+openssl x509 -in /var/db/santa/cert.pem  -text
+
 ## Creators
 
 **Remco Verhoef**
 - <https://twitter.com/remco_verhoef>
 - <https://twitter.com/dutchcoders>
-
-**Uvis Grinfelds**
 
 ## Copyright and license
 

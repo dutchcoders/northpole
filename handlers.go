@@ -26,22 +26,56 @@ package main
 
 import (
 	"fmt"
-	"github.com/gorilla/mux"
+	"github.com/gin-gonic/gin"
+	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/jinzhu/gorm"
 	"io"
 	"io/ioutil"
 	"log"
 	"mime/multipart"
 	"net/http"
+	"strconv"
 	"time"
 )
 
+type jsonTime time.Time
+
+func (t jsonTime) MarshalJSON() ([]byte, error) {
+	return []byte(strconv.FormatInt(time.Time(t).Unix(), 10)), nil
+}
+
+func (t *jsonTime) UnmarshalJSON(s []byte) (err error) {
+	q, err := strconv.ParseFloat(string(s), 64)
+
+	if err != nil {
+		return
+	}
+
+	*(*time.Time)(t) = time.Unix(int64(q), 0)
+	return
+}
+
 type PreflightRequest struct {
 	SerialNo     string `json:"serial_no"`
-	Hostname     string `json:hostname`
-	SantaVersion string `json:"santa_version"`
+	Hostname     string `json:"hostname"`
+	SantaVersion string `json" json:"santa_version"`
 	OsVersion    string `json:"os_version"`
 	OsBuild      string `json:"os_build"`
 	PrimaryUser  string `json:"primary_user"`
+}
+
+type Machine struct {
+	MachineId    string `gorm:"column:machineid"`
+	SerialNo     string `gorm:"column:serial_no"`
+	Hostname     string `gorm:"column:hostname"`
+	SantaVersion string `gorm:"column:santa_version"`
+	OsVersion    string `gorm:"column:os_version"`
+	OsBuild      string `gorm:"column:os_build"`
+	PrimaryUser  string `gorm:"column:primary_user"`
+}
+
+func (c Machine) TableName() string {
+	return "machines"
 }
 
 type PreflightResponse struct {
@@ -55,7 +89,7 @@ func (t *PreflightRequest) String() string {
 }
 
 type RuleDownloadRequest struct {
-	cursor string `json:"cursor"`
+	Cursor string `json:"cursor,omitempty"`
 }
 
 type RuleDownloadResponse struct {
@@ -75,104 +109,116 @@ type Rule struct {
 }
 
 type Event struct {
-	FileSha1        string     `json:"file_sha1"`
-	FilePath        string     `json:"file_path"`
-	FileName        string     `json:"file_name"`
-	ExecutionUser   string     `json:execution_user`
-	ExecutionTime   float64    `json:execution_time`
-	Decision        EventState `json:"decision"`
-	LoggedInUsers   []string   `json:"logged_in_users"`
-	CurrentSessions []string   `json:"current_sessions"`
+	EventId         int64      `gorm:"column:eventid; primary_key:yes`
+	MachineId       string     `gorm:"column:machineid"`
+	FileSha1        string     `gorm:"column:sha1" json:"file_sha1"`
+	FilePath        string     `gorm:"column:filepath" json:"file_path" `
+	FileName        string     `gorm:"column:filename" json:"file_name"`
+	ExecutionUser   string     `sql:"-"; json:execution_user`
+	ExecutionTime   jsonTime   `gorm:"column:execution_time" sql:"-" json:"execution_time"`
+	Decision        EventState `gorm:"column:decision" sql:"type:int;" json:"decision"`
+	LoggedInUsers   []string   `sql:"-" json:"logged_in_users"`
+	CurrentSessions []string   `sql:"-" json:"current_sessions"`
 
-	FileBundleId            string `json:file_bundle_id`
-	FileBundleName          string `json:file_bundle_name`
-	FileBundleVersion       string `json:file_bundle_version`
-	FileBundleVersionString string `json:file_bundle_version_string`
+	FileBundleId            string `sql:"-" json:file_bundle_id`
+	FileBundleName          string `sql:"-" json:file_bundle_name`
+	FileBundleVersion       string `sql:"-" json:file_bundle_version`
+	FileBundleVersionString string `sql:"-" json:file_bundle_version_string`
 
-	CertificateSha1       string    `json:cert_sha1`
-	CertificateCN         string    `json:cert_cn`
-	CertificateOrg        string    `json:cert_org`
-	CertificateOU         string    `json:cert_ou`
-	CertificateValidFrom  time.Time `json:cert_valid_from`
-	CertfiicateValidUntil time.Time `json:cert_valid_until`
+	CertificateSha1       string    `sql:"-" json:cert_sha1`
+	CertificateCN         string    `sql:"-" json:cert_cn`
+	CertificateOrg        string    `sql:"-" json:cert_org`
+	CertificateOU         string    `sql:"-" json:cert_ou`
+	CertificateValidFrom  time.Time `sql:"-" json:cert_valid_from`
+	CertificateValidUntil time.Time `sql:"-" json:cert_valid_until`
 }
 
-func preFlightHandler(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	machineid := vars["machineid"]
+func preFlightHandler(c *gin.Context) {
+	machineid := c.Params.ByName("machineid")
 
 	log.Printf("Preflight received from: %s\n", machineid)
 
 	var t PreflightRequest
-	if err := ReadJSON(w, r, &t); err != nil {
-		panic(err)
+	c.Bind(&t)
+
+	var machine *Machine = &Machine{
+		MachineId:    machineid,
+		SerialNo:     t.SerialNo,
+		Hostname:     t.Hostname,
+		SantaVersion: t.SantaVersion,
+		OsVersion:    t.OsVersion,
+		OsBuild:      t.OsBuild,
+		PrimaryUser:  t.PrimaryUser,
 	}
+
+	tx := db.Begin()
+	tx.Create(machine)
+	tx.Commit()
 
 	var rdr PreflightResponse
 	rdr.BatchSize = 20
-	rdr.UploadLogsUrl = fmt.Sprintf("%s://%s/upload/%s", r.URL.Scheme, r.Host, machineid)
+	rdr.UploadLogsUrl = fmt.Sprintf("%s://%s/upload/%s", c.Request.URL.Scheme, c.Request.Host, machineid)
 	rdr.ClientMode = ClientModeMonitor
-	if err := WriteJSON(w, r, rdr); err != nil {
-		panic(err)
-	}
-
-	w.WriteHeader(http.StatusOK)
+	c.JSON(200, rdr)
 }
 
-func postFlightHandler(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	machineid := vars["machineid"]
+func postFlightHandler(c *gin.Context) {
+	machineid := c.Params.ByName("machineid")
 
 	log.Printf("Postflight received from: %s\n", machineid)
 
-	w.WriteHeader(http.StatusOK)
+	c.JSON(200, gin.H{})
 }
 
-func ruleDownloadHandler(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	machineid := vars["machineid"]
+func ruleDownloadHandler(c *gin.Context) {
+	machineid := c.Params.ByName("machineid")
 
 	log.Printf("Sending rules to: %s\n", machineid)
 
 	var t RuleDownloadRequest
-	if err := ReadJSON(w, r, &t); err != nil {
-		panic(err)
-	}
+	c.Bind(&t)
 
 	var rdr RuleDownloadResponse
 	// rdr.Rules = make([]Rule, 0)
-	rdr.Rules = []*Rule{&Rule{Sha1: "d6b3853583a7dd19449275723b05b7a7e75d4529", State: RuleStateBlacklist, Type: RuleTypeBinary}}
-	if err := WriteJSON(w, r, rdr); err != nil {
-		panic(err)
-	}
-
-	w.WriteHeader(http.StatusOK)
+	rdr.Rules = []*Rule{&Rule{Sha1: "d6b3853583a7dd19449275723b05b7a7e75d4529", State: RuleStateRemove, Type: RuleTypeBinary, CustomMessage: "test"}}
+	c.JSON(200, rdr)
 }
 
-func eventUploadHandler(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	machineid := vars["machineid"]
+func eventUploadHandler(c *gin.Context) {
+	machineid := c.Params.ByName("machineid")
 
 	log.Printf("Receiving events for: %s\n", machineid)
+
 	var t EventUploadRequest
-	if err := ReadJSON(w, r, &t); err != nil {
-		panic(err)
-	}
+	c.Bind(&t)
+
+	tx := db.Begin()
+	fmt.Println(tx)
+
+	fmt.Println(t)
+	fmt.Println(t.Events)
 
 	for _, e := range t.Events {
-		fmt.Println(e)
+		fmt.Println(e.ExecutionTime)
+		fmt.Println(e.FilePath)
+		e.MachineId = machineid
+		tx.Create(e)
+		// db.Exec("INSERT INTO events (sha1, filename) VALUES (?, ?)", e.FileSha1, e.FileName)
 	}
 
-	w.WriteHeader(http.StatusOK)
+	tx.Commit()
+
+	c.JSON(500, gin.H{})
+
+	c.JSON(200, gin.H{})
 }
 
-func uploadLogHandler(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	machineid := vars["machineid"]
+func uploadLogHandler(c *gin.Context) {
+	machineid := c.Params.ByName("machineid")
 
 	log.Printf("Receiving logs from: %s\n", machineid)
 
-	mr := multipart.NewReader(r.Body, "santa-sync-upload-boundary" /*params["boundary"]*/)
+	mr := multipart.NewReader(c.Request.Body, "santa-sync-upload-boundary" /*params["boundary"]*/)
 	for {
 		p, err := mr.NextPart()
 		if err == io.EOF {
@@ -185,13 +231,14 @@ func uploadLogHandler(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Fatal(err)
 		}
+
 		fmt.Printf("Part %q: %q\n", p.Header.Get("Foo"), slurp)
 	}
 
-	w.WriteHeader(http.StatusOK)
+	c.JSON(200, gin.H{})
 }
 
-func viewHandler(w http.ResponseWriter, r *http.Request) {
+func viewHandler(c *gin.Context) {
 }
 
 func notFoundHandler(w http.ResponseWriter, r *http.Request) {
